@@ -7,6 +7,8 @@ import io
 import json
 import math
 import os
+import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -18,14 +20,37 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 
 
+def positive_int_setting(name: str, default: int) -> int:
+    raw_value = os.getenv(name, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a positive integer, got {raw_value!r}") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {raw_value!r}")
+    return value
+
+
+def default_cache_directory() -> Path:
+    """Return an app-specific cache path following the host OS convention."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "nearest-metar"
+    if sys.platform == "win32":
+        root = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return root / "NearestMETAR" / "Cache"
+    root = Path(os.getenv("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return root / "nearest-metar"
+
+
 METAR_CACHE_URL = "https://aviationweather.gov/data/cache/metars.cache.csv.gz"
 STATION_CACHE_URL = "https://aviationweather.gov/data/cache/stations.cache.json.gz"
 REVERSE_GEOCODE_URL = "https://nominatim.openstreetmap.org/reverse"
 CACHE_SECONDS = 300
 STATION_CACHE_SECONDS = 86_400
-NEAREST_STATION_COUNT = 7
+NEAREST_STATION_COUNT = positive_int_setting("NEAREST_METAR_STATION_COUNT", 7)
+DEFAULT_PORT = 5050
 USER_AGENT = "NearestMETAR/1.0 (personal weather display)"
-CACHE_DIRECTORY = Path(os.getenv("WEATHER_CACHE_DIR", Path(__file__).parent / ".cache"))
+CACHE_DIRECTORY = Path(os.getenv("NEAREST_METAR_CACHE_DIR", default_cache_directory()))
 STATION_CACHE_FILE = CACHE_DIRECTORY / "stations.json"
 
 app = Flask(__name__)
@@ -41,6 +66,20 @@ _cache: MetarCache | None = None
 _cache_lock = threading.Lock()
 _stations: dict[str, dict] | None = None
 _stations_lock = threading.Lock()
+
+
+def ensure_port_available(port: int) -> None:
+    """Exit with a useful message when another process already owns the port."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("0.0.0.0", port))
+    except OSError as exc:
+        raise SystemExit(
+            f"Cannot start Nearest METAR: port {port} is already in use. "
+            f"Choose another port, for example: NEAREST_METAR_PORT={port + 1} python app.py"
+        ) from exc
+    finally:
+        probe.close()
 
 
 def _number(value: str | None) -> float | None:
@@ -258,4 +297,9 @@ def nearest_metar():
 
 
 if __name__ == "__main__":
-    app.run(host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "5000")), debug=True)
+    selected_port = int(os.getenv("NEAREST_METAR_PORT", str(DEFAULT_PORT)))
+    # The debug reloader imports this file in a child process. Only the parent
+    # should probe, otherwise it can mistake Werkzeug's inherited socket for a conflict.
+    if os.getenv("WERKZEUG_RUN_MAIN") != "true":
+        ensure_port_available(selected_port)
+    app.run(host=os.getenv("NEAREST_METAR_HOST", "127.0.0.1"), port=selected_port, debug=True)
