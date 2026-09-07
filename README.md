@@ -17,4 +17,20 @@ The app downloads the official compressed current-METAR feed on demand and keeps
 
 Browser coordinates are sent to OpenStreetMap's Nominatim service to obtain a readable city/country label. The app does not persist those coordinates.
 
+## Logging
+
+After downloading a fresh observation feed, the app writes an info-level message with the number of METAR observations received:
+
+```text
+Fetched 5113 METAR observations from Aviation Weather Center
+```
+
+The feed is cached in memory for five minutes, so requests served from that cache do not produce another fetch message.
+
+Flask normally hides info-level messages. Run the development server in debug mode to display them:
+
+```bash
+flask --app app run --debug
+```
+
 METARs are aviation observations and this app is for informational use, not flight planning.

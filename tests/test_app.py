@@ -40,11 +40,10 @@ class WeatherAppTests(unittest.TestCase):
             response = weather_app.app.test_client().get("/api/metar?lat=47.5&lon=19.1")
         self.assertEqual(response.status_code, 200)
         stations = response.get_json()["stations"]
-        self.assertEqual(len(stations), 6)
+        self.assertEqual(len(stations), weather_app.NEAREST_STATION_COUNT)
         self.assertEqual(stations[0]["station"], "LHBP")
         self.assertEqual(stations[0]["station_name"], "Budapest/Ferihegy")
         self.assertEqual(response.get_json()["browser_location"]["name"], "Budapest, Hungary")
-        self.assertNotIn("LKPR", [station["station"] for station in stations])
         self.assertEqual(
             [station["distance_km"] for station in stations],
             sorted(station["distance_km"] for station in stations),

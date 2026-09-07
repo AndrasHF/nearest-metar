@@ -94,6 +94,7 @@ def fetch_observations() -> list[dict]:
             observations = parse_metar_csv(response.read())
         if not observations:
             raise ValueError("No current weather observations were available.")
+        app.logger.info("Fetched %d METAR observations from Aviation Weather Center", len(observations))
         _cache = MetarCache(observations, now)
         return observations
 
