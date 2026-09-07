@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#e9e7df">
+  <title>Nearest METAR</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main>
+    <header>
+      <a class="brand" href="/" aria-label="Nearest METAR home"><span class="brand-mark">NW</span><span>NEAREST<br>WEATHER</span></a>
+      <div class="live"><i></i> LIVE OBSERVATIONS</div>
+    </header>
+
+    <section class="hero">
+      <p class="eyebrow">AVIATION WEATHER / YOUR POSITION</p>
+      <h1>Weather from<br>the <em>nearest</em> runway.</h1>
+      <p class="intro">Find the closest reporting airport and read its latest METAR—raw, decoded, and right where you are.</p>
+      <div id="browser-location" class="browser-location" hidden><span>YOUR LOCATION</span><strong id="browser-location-name">—</strong></div>
+      <button id="locate" type="button"><span>Use my location</span><b aria-hidden="true">↗</b></button>
+      <p id="privacy" class="privacy">Your coordinates are used to find nearby stations and sent to OpenStreetMap for the place name. They are not stored by this app.</p>
+    </section>
+
+    <section id="status" class="status" aria-live="polite" hidden></section>
+
+    <section id="weather" class="weather" hidden>
+      <div class="station-row">
+        <div>
+          <p class="eyebrow">SELECT A NEARBY REPORTING STATION</p>
+          <div class="station-picker">
+            <label for="station-select">STATION</label>
+            <select id="station-select" aria-label="Choose a nearby METAR station"></select>
+          </div>
+          <h2 id="station">—</h2>
+          <p id="station-name" class="station-name">Station name unavailable</p>
+          <p id="station-location" class="station-location">Location unavailable</p>
+        </div>
+        <div class="station-meta"><span id="distance">—</span><small>FROM YOU</small></div>
+      </div>
+
+      <div class="summary">
+        <div class="temperature"><strong id="temperature">—</strong><span>°C</span></div>
+        <div><span id="category" class="category">—</span><p id="observed">Observation time unavailable</p></div>
+      </div>
+
+      <div class="metrics">
+        <article><span>WIND</span><strong id="wind">—</strong></article>
+        <article><span>VISIBILITY</span><strong id="visibility">—</strong></article>
+        <article><span>DEW POINT</span><strong id="dewpoint">—</strong></article>
+        <article><span>ALTIMETER</span><strong id="altimeter">—</strong></article>
+      </div>
+
+      <div class="station-details">
+        <article><span>STATION POSITION</span><strong id="station-position">—</strong></article>
+        <article><span>ELEVATION</span><strong id="station-elevation">—</strong></article>
+        <article><span>IATA CODE</span><strong id="station-iata">—</strong></article>
+      </div>
+
+      <div class="raw-block">
+        <div><span>RAW METAR</span><button id="copy" type="button">COPY</button></div>
+        <code id="raw">—</code>
+      </div>
+    </section>
+  </main>
+  <footer><span>DATA: NOAA AVIATION WEATHER CENTER · LOCATION: © OPENSTREETMAP CONTRIBUTORS</span><span>FOR INFORMATIONAL USE · NOT FOR FLIGHT PLANNING</span></footer>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
