@@ -10,6 +10,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -179,6 +180,30 @@ class GeocodingTests(ServiceTests):
         weather_app.reverse_geocode(47.5, 19.1, "en")
         self.assertEqual(self.download.call_count, 2)
         self.assertEqual(self.download.call_args.args[0].get_header("Accept-language"), "hu")
+
+    def test_configured_endpoint_preserves_existing_query_parameters(self):
+        endpoint = "https://provider.example/reverse?key=a%2Bb%26c&tag=one&tag=two&empty=#section"
+        with patch.object(weather_app, "REVERSE_GEOCODE_URL", endpoint):
+            weather_app.reverse_geocode(47.5, 19.1)
+        url = urllib.parse.urlsplit(self.download.call_args.args[0].full_url)
+        self.assertEqual((url.scheme, url.netloc, url.path, url.fragment), (
+            "https", "provider.example", "/reverse", "section",
+        ))
+        self.assertEqual(urllib.parse.parse_qs(url.query, keep_blank_values=True), {
+            "key": ["a+b&c"], "tag": ["one", "two"], "empty": [""],
+            "lat": ["47.5"], "lon": ["19.1"], "format": ["jsonv2"],
+            "zoom": ["10"], "addressdetails": ["1"],
+        })
+
+    def test_request_parameters_override_configured_endpoint_defaults(self):
+        endpoint = "https://provider.example/reverse?lat=0&lon=0&format=xml&zoom=1&addressdetails=0"
+        with patch.object(weather_app, "REVERSE_GEOCODE_URL", endpoint):
+            weather_app.reverse_geocode(47.5, 19.1)
+        url = urllib.parse.urlsplit(self.download.call_args.args[0].full_url)
+        self.assertEqual(urllib.parse.parse_qs(url.query), {
+            "lat": ["47.5"], "lon": ["19.1"], "format": ["jsonv2"],
+            "zoom": ["10"], "addressdetails": ["1"],
+        })
 
     def test_cached_labels_expire(self):
         weather_app.reverse_geocode(47.5, 19.1)

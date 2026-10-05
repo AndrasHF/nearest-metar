@@ -272,11 +272,17 @@ def reverse_geocode(lat: float, lon: float, language: str = "en") -> dict:
 
 
 def _reverse_geocode_uncached(lat: float, lon: float, language: str) -> dict:
-    params = urllib.parse.urlencode(
-        {"lat": lat, "lon": lon, "format": "jsonv2", "zoom": 10, "addressdetails": 1}
-    )
+    params = {"lat": lat, "lon": lon, "format": "jsonv2", "zoom": 10, "addressdetails": 1}
+    endpoint = urllib.parse.urlsplit(REVERSE_GEOCODE_URL)
+    query = [
+        (name, value)
+        for name, value in urllib.parse.parse_qsl(endpoint.query, keep_blank_values=True)
+        if name not in params
+    ]
+    query.extend(params.items())
+    url = urllib.parse.urlunsplit(endpoint._replace(query=urllib.parse.urlencode(query)))
     headers = {"User-Agent": USER_AGENT, "Accept-Language": language}
-    req = urllib.request.Request(f"{REVERSE_GEOCODE_URL}?{params}", headers=headers)
+    req = urllib.request.Request(url, headers=headers)
     result = _fetch_geocode(req)
     address = result.get("address", {})
     locality = next(
