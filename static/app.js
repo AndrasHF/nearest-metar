@@ -15,14 +15,22 @@ function value(number, suffix = "") {
   return number == null ? "—" : `${number}${suffix}`;
 }
 
+function formatWind(data) {
+  if (data.wind_speed_kt == null) return "—";
+  if (data.wind_speed_kt === 0 && !(data.wind_gust_kt > 0)) return "CALM";
+  const rawDirection = data.wind_direction;
+  const direction = rawDirection === "VRB" ? "VRB"
+    : (rawDirection != null && rawDirection !== "" && Number.isFinite(Number(rawDirection)) ? `${rawDirection}°` : "—");
+  return `${direction} / ${data.wind_speed_kt}${data.wind_gust_kt == null ? "" : ` G${data.wind_gust_kt}`} KT`;
+}
+
 function render(data) {
   $("station").textContent = data.station;
   $("distance").textContent = data.distance_km < 1 ? `${Math.round(data.distance_km * 1000)} M` : `${data.distance_km} KM`;
   $("temperature").textContent = value(data.temperature_c);
   $("category").textContent = data.flight_category || "UNREPORTED";
   $("observed").textContent = data.observed_at ? `OBSERVED ${new Date(data.observed_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}` : "Observation time unavailable";
-  const direction = data.wind_direction === "0" || data.wind_direction === 0 ? "VRB" : (data.wind_direction ? `${data.wind_direction}°` : "—");
-  $("wind").textContent = data.wind_speed_kt == null ? "—" : `${direction} / ${data.wind_speed_kt}${data.wind_gust_kt == null ? "" : ` G${data.wind_gust_kt}`} KT`;
+  $("wind").textContent = formatWind(data);
   $("visibility").textContent = value(data.visibility_mi, " SM");
   $("dewpoint").textContent = value(data.dewpoint_c, " °C");
   $("altimeter").textContent = value(data.altimeter_in_hg, " inHg");

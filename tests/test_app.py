@@ -5,6 +5,7 @@ import socket
 import sys
 from pathlib import Path
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 import app as weather_app
@@ -74,6 +75,41 @@ class WeatherAppTests(unittest.TestCase):
     def test_rejects_invalid_coordinates(self):
         response = weather_app.app.test_client().get("/api/metar?lat=999&lon=nope")
         self.assertEqual(response.status_code, 400)
+
+    def test_metadata_failure_does_not_hide_valid_weather(self):
+        observation = {
+            "station_id": "LHBP", "_lat": 47.44, "_lon": 19.26,
+            "raw_text": "LHBP TEST", "temp_c": "12",
+        }
+        for error in (urllib.error.URLError("catalog unavailable"), ValueError("bad cache")):
+            with (
+                self.subTest(error=error),
+                patch.object(weather_app, "fetch_observations", return_value=[observation]),
+                patch.object(weather_app, "fetch_station_metadata", side_effect=error),
+                patch.object(weather_app, "reverse_geocode", return_value={"name": "Budapest"}),
+                patch.object(weather_app.app.logger, "warning"),
+            ):
+                response = weather_app.app.test_client().get("/api/metar?lat=47.5&lon=19.1")
+            self.assertEqual(response.status_code, 200)
+            station = response.get_json()["stations"][0]
+            self.assertEqual(station["raw"], "LHBP TEST")
+            self.assertEqual(station["temperature_c"], 12)
+            self.assertIsNone(station["station_name"])
+
+    def test_geocode_failure_returns_weather_with_coordinates(self):
+        observation = {"station_id": "LHBP", "_lat": 47.44, "_lon": 19.26}
+        with (
+            patch.object(weather_app, "fetch_observations", return_value=[observation]),
+            patch.object(weather_app, "fetch_station_metadata", return_value={}),
+            patch.object(weather_app, "reverse_geocode", side_effect=OSError("cache unwritable")),
+            patch.object(weather_app.app.logger, "warning"),
+        ):
+            response = weather_app.app.test_client().get("/api/metar?lat=47.5&lon=19.1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["stations"][0]["station"], "LHBP")
+        self.assertEqual(response.get_json()["browser_location"], {
+            "name": "47.5000, 19.1000", "latitude": 47.5, "longitude": 19.1,
+        })
 
     def test_haversine_known_distance(self):
         distance = weather_app.distance_km(47.5, 19.1, 48.1, 16.6)

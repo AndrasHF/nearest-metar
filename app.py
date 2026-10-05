@@ -8,12 +8,15 @@ import json
 import math
 import os
 import socket
+import sqlite3
 import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,9 +47,13 @@ def default_cache_directory() -> Path:
 
 METAR_CACHE_URL = "https://aviationweather.gov/data/cache/metars.cache.csv.gz"
 STATION_CACHE_URL = "https://aviationweather.gov/data/cache/stations.cache.json.gz"
-REVERSE_GEOCODE_URL = "https://nominatim.openstreetmap.org/reverse"
+REVERSE_GEOCODE_URL = os.getenv("NEAREST_METAR_GEOCODE_URL", "https://nominatim.openstreetmap.org/reverse")
 CACHE_SECONDS = 300
 STATION_CACHE_SECONDS = 86_400
+STATION_RETRY_SECONDS = 300
+GEOCODE_CACHE_SECONDS = 86_400
+GEOCODE_CACHE_SIZE = 256
+GEOCODE_INTERVAL_SECONDS = 1.0
 NEAREST_STATION_COUNT = positive_int_setting("NEAREST_METAR_STATION_COUNT", 7)
 DEFAULT_PORT = 5050
 USER_AGENT = "NearestMETAR/1.0 (personal weather display)"
@@ -65,7 +72,10 @@ class MetarCache:
 _cache: MetarCache | None = None
 _cache_lock = threading.Lock()
 _stations: dict[str, dict] | None = None
+_stations_expires_at = 0.0
 _stations_lock = threading.Lock()
+_geocode_cache: OrderedDict[tuple[float, float, str], tuple[float, dict]] = OrderedDict()
+_geocode_lock = threading.Lock()
 
 
 def ensure_port_available(port: int) -> None:
@@ -140,7 +150,16 @@ def fetch_observations() -> list[dict]:
 
 def _read_station_cache() -> dict[str, dict]:
     with STATION_CACHE_FILE.open(encoding="utf-8") as cache_file:
-        return json.load(cache_file)
+        stations = json.load(cache_file)
+    _validate_station_metadata(stations)
+    return stations
+
+
+def _validate_station_metadata(stations: dict[str, dict]) -> None:
+    if not isinstance(stations, dict) or not stations or not all(
+        station_id and isinstance(details, dict) for station_id, details in stations.items()
+    ):
+        raise ValueError("The station catalog has an unexpected data format.")
 
 
 def _write_station_cache(stations: dict[str, dict]) -> None:
@@ -153,26 +172,31 @@ def _write_station_cache(stations: dict[str, dict]) -> None:
 
 def fetch_station_metadata() -> dict[str, dict]:
     """Return station details, persisting the once-daily AWC catalog on disk."""
-    global _stations
-    if _stations is not None:
-        return _stations
-
+    global _stations, _stations_expires_at
     with _stations_lock:
-        if _stations is not None:
+        now = time.monotonic()
+        if _stations is not None and now < _stations_expires_at:
             return _stations
-        cache_is_fresh = (
-            STATION_CACHE_FILE.exists()
-            and time.time() - STATION_CACHE_FILE.stat().st_mtime < STATION_CACHE_SECONDS
-        )
-        if cache_is_fresh:
-            _stations = _read_station_cache()
-            return _stations
+
+        stale = _stations
+        try:
+            disk_stations = _read_station_cache()
+            age = max(0, time.time() - STATION_CACHE_FILE.stat().st_mtime)
+            if age < STATION_CACHE_SECONDS:
+                _stations = disk_stations
+                _stations_expires_at = now + STATION_CACHE_SECONDS - age
+                return _stations
+            stale = disk_stations
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError):
+            app.logger.warning("Ignoring unreadable station metadata cache", exc_info=True)
 
         try:
             req = urllib.request.Request(STATION_CACHE_URL, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=20) as response:
                 records = json.loads(gzip.decompress(response.read()).decode("utf-8"))
-            _stations = {
+            stations = {
                 station_id: {
                     "name": record.get("site"),
                     "state": record.get("state"),
@@ -183,23 +207,77 @@ def fetch_station_metadata() -> dict[str, dict]:
                 for record in records
                 if (station_id := record.get("icaoId") or record.get("id"))
             }
-            _write_station_cache(_stations)
+            _validate_station_metadata(stations)
         except Exception:
-            if not STATION_CACHE_FILE.exists():
-                raise
-            app.logger.warning("Using stale station metadata cache", exc_info=True)
-            _stations = _read_station_cache()
+            app.logger.warning("Station metadata unavailable; using cached details if available", exc_info=True)
+            _stations = stale or {}
+            _stations_expires_at = time.monotonic() + STATION_RETRY_SECONDS
+            return _stations
+
+        _stations = stations
+        _stations_expires_at = time.monotonic() + STATION_CACHE_SECONDS
+        try:
+            _write_station_cache(stations)
+        except OSError:
+            app.logger.warning("Unable to persist station metadata cache", exc_info=True)
         return _stations
 
 
+def _fetch_geocode(req: urllib.request.Request) -> dict:
+    """Serialize requests across workers sharing the cache directory.
+
+    Only a rate-limit timestamp is persisted, never coordinates or place names.
+    Hold the transaction through the request and leave a one-second gap after
+    completion, including failed requests.
+    """
+    CACHE_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(CACHE_DIRECTORY / "geocoding.sqlite3", timeout=30)) as connection:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS rate_limit (id INTEGER PRIMARY KEY, next_allowed REAL NOT NULL)"
+        )
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute("SELECT next_allowed FROM rate_limit WHERE id = 1").fetchone()
+        if row:
+            delay = row[0] - time.time()
+            if delay > 0:
+                time.sleep(delay)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return json.load(response)
+        finally:
+            connection.execute(
+                "INSERT OR REPLACE INTO rate_limit VALUES (1, ?)",
+                (time.time() + GEOCODE_INTERVAL_SECONDS,),
+            )
+            connection.commit()
+
+
 def reverse_geocode(lat: float, lon: float, language: str = "en") -> dict:
+    language = language[:64] or "en"
+    key = (lat, lon, language)
+    # Check the cache under the same lock as downloads to coalesce concurrent
+    # requests for the same location. The SQLite lock handles other workers.
+    with _geocode_lock:
+        now = time.monotonic()
+        cached = _geocode_cache.get(key)
+        if cached and now < cached[0]:
+            _geocode_cache.move_to_end(key)
+            return dict(cached[1])
+        _geocode_cache.pop(key, None)
+        location = _reverse_geocode_uncached(lat, lon, language)
+        _geocode_cache[key] = (time.monotonic() + GEOCODE_CACHE_SECONDS, location)
+        while len(_geocode_cache) > GEOCODE_CACHE_SIZE:
+            _geocode_cache.popitem(last=False)
+        return dict(location)
+
+
+def _reverse_geocode_uncached(lat: float, lon: float, language: str) -> dict:
     params = urllib.parse.urlencode(
         {"lat": lat, "lon": lon, "format": "jsonv2", "zoom": 10, "addressdetails": 1}
     )
-    headers = {"User-Agent": USER_AGENT, "Accept-Language": language[:64] or "en"}
+    headers = {"User-Agent": USER_AGENT, "Accept-Language": language}
     req = urllib.request.Request(f"{REVERSE_GEOCODE_URL}?{params}", headers=headers)
-    with urllib.request.urlopen(req, timeout=10) as response:
-        result = json.load(response)
+    result = _fetch_geocode(req)
     address = result.get("address", {})
     locality = next(
         (address.get(key) for key in ("city", "town", "village", "municipality", "county") if address.get(key)),
@@ -268,7 +346,11 @@ def nearest_metar():
 
     try:
         observations = fetch_observations()
-        metadata = fetch_station_metadata()
+        try:
+            metadata = fetch_station_metadata()
+        except Exception:
+            app.logger.warning("Station metadata unavailable", exc_info=True)
+            metadata = {}
         nearest = heapq.nsmallest(
             NEAREST_STATION_COUNT,
             observations,
