@@ -76,6 +76,7 @@ _stations_expires_at = 0.0
 _stations_lock = threading.Lock()
 _geocode_cache: OrderedDict[tuple[float, float, str], tuple[float, dict]] = OrderedDict()
 _geocode_lock = threading.Lock()
+_geocode_download_lock = threading.Lock()
 
 
 def ensure_port_available(port: int) -> None:
@@ -252,11 +253,7 @@ def _fetch_geocode(req: urllib.request.Request) -> dict:
             connection.commit()
 
 
-def reverse_geocode(lat: float, lon: float, language: str = "en") -> dict:
-    language = language[:64] or "en"
-    key = (lat, lon, language)
-    # Check the cache under the same lock as downloads to coalesce concurrent
-    # requests for the same location. The SQLite lock handles other workers.
+def _cached_geocode(key: tuple[float, float, str]) -> dict | None:
     with _geocode_lock:
         now = time.monotonic()
         cached = _geocode_cache.get(key)
@@ -264,10 +261,27 @@ def reverse_geocode(lat: float, lon: float, language: str = "en") -> dict:
             _geocode_cache.move_to_end(key)
             return dict(cached[1])
         _geocode_cache.pop(key, None)
+        return None
+
+
+def reverse_geocode(lat: float, lon: float, language: str = "en") -> dict:
+    language = language[:64] or "en"
+    key = (lat, lon, language)
+    cached = _cached_geocode(key)
+    if cached is not None:
+        return cached
+
+    # Serialize cache misses separately so hits never wait for network calls.
+    # Recheck after waiting to coalesce requests for the same location.
+    with _geocode_download_lock:
+        cached = _cached_geocode(key)
+        if cached is not None:
+            return cached
         location = _reverse_geocode_uncached(lat, lon, language)
-        _geocode_cache[key] = (time.monotonic() + GEOCODE_CACHE_SECONDS, location)
-        while len(_geocode_cache) > GEOCODE_CACHE_SIZE:
-            _geocode_cache.popitem(last=False)
+        with _geocode_lock:
+            _geocode_cache[key] = (time.monotonic() + GEOCODE_CACHE_SECONDS, location)
+            while len(_geocode_cache) > GEOCODE_CACHE_SIZE:
+                _geocode_cache.popitem(last=False)
         return dict(location)
 
 

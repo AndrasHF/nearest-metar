@@ -152,6 +152,7 @@ class GeocodingTests(ServiceTests):
         super().setUp()
         self.stack.enter_context(patch.object(weather_app, "_geocode_cache", OrderedDict()))
         self.stack.enter_context(patch.object(weather_app, "_geocode_lock", threading.Lock()))
+        self.stack.enter_context(patch.object(weather_app, "_geocode_download_lock", threading.Lock()))
         self.sleep = self.stack.enter_context(patch.object(weather_app.time, "sleep", side_effect=self.advance))
         self.starts = []
         self.download = self.stack.enter_context(patch.object(
@@ -173,6 +174,43 @@ class GeocodingTests(ServiceTests):
         self.assertEqual(weather_app.reverse_geocode(47.5, 19.1), second)
         self.download.assert_called_once()
         self.sleep.assert_not_called()
+
+    def test_cached_result_returns_during_unrelated_lookup(self):
+        for phase in ("throttle", "download"):
+            with self.subTest(phase=phase):
+                weather_app._geocode_cache.clear()
+                expected = weather_app.reverse_geocode(47.5, 19.1)
+                self.download.reset_mock()
+                entered = threading.Event()
+                release = threading.Event()
+
+                def block():
+                    entered.set()
+                    if not release.wait(timeout=5):
+                        raise TimeoutError("Test did not release the unrelated lookup")
+
+                def delayed_response(request, timeout):
+                    block()
+                    return self.response(request, timeout)
+
+                def delayed_sleep(seconds):
+                    block()
+                    self.advance(seconds)
+
+                target = self.sleep if phase == "throttle" else self.download
+                side_effect = delayed_sleep if phase == "throttle" else delayed_response
+                with patch.object(target, "side_effect", side_effect):
+                    with ThreadPoolExecutor(max_workers=2) as pool:
+                        unrelated = pool.submit(weather_app.reverse_geocode, 48, 16)
+                        try:
+                            self.assertTrue(entered.wait(timeout=2))
+                            cached = pool.submit(weather_app.reverse_geocode, 47.5, 19.1)
+                            self.assertEqual(cached.result(timeout=1), expected)
+                            self.assertFalse(unrelated.done())
+                        finally:
+                            release.set()
+                        unrelated.result(timeout=2)
+                self.download.assert_called_once()
 
     def test_language_is_part_of_cache_key(self):
         weather_app.reverse_geocode(47.5, 19.1, "en")
