@@ -10,6 +10,7 @@ import os
 import socket
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -174,11 +175,21 @@ def _validate_station_metadata(stations: dict[str, dict]) -> None:
 
 
 def _write_station_cache(stations: dict[str, dict]) -> None:
-    CACHE_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    temporary = STATION_CACHE_FILE.with_suffix(".tmp")
-    with temporary.open("w", encoding="utf-8") as cache_file:
-        json.dump(stations, cache_file, ensure_ascii=False, separators=(",", ":"))
-    os.replace(temporary, STATION_CACHE_FILE)
+    """Publish a complete catalog without sharing a temporary file with workers."""
+    STATION_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Keep each writer's private file on the destination filesystem so the
+    # replacement is atomic. Close it before replacing for Windows support.
+    cache_file = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=STATION_CACHE_FILE.parent,
+        prefix=f".{STATION_CACHE_FILE.name}.", suffix=".tmp", delete=False,
+    )
+    temporary = Path(cache_file.name)
+    try:
+        with cache_file:
+            json.dump(stations, cache_file, ensure_ascii=False, separators=(",", ":"))
+        os.replace(temporary, STATION_CACHE_FILE)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def fetch_station_metadata() -> dict[str, dict]:

@@ -146,6 +146,79 @@ class StationMetadataTests(ServiceTests):
         self.assertEqual(weather_app.fetch_station_metadata(), result)
         self.download.assert_called_once()
 
+    def test_concurrent_processes_publish_complete_station_catalogs(self):
+        # Pause one worker with an open, partially written file while another
+        # publishes a shorter catalog. Process-local locks cannot protect this.
+        script = '''
+import json, sys
+from pathlib import Path
+from unittest.mock import patch
+import app
+app.CACHE_DIRECTORY = Path(sys.argv[1])
+app.STATION_CACHE_FILE = app.CACHE_DIRECTORY / "stations.json"
+def delayed_dump(stations, cache_file, **options):
+    payload = json.dumps(stations, **options)
+    cache_file.write(payload[:100])
+    cache_file.flush()
+    print("READY", flush=True)
+    if sys.stdin.readline().strip() != "RESUME":
+        raise RuntimeError("Worker was not resumed")
+    cache_file.write(payload[100:])
+if sys.argv[2] == "long":
+    with patch.object(app.json, "dump", side_effect=delayed_dump):
+        app._write_station_cache({"LONG": {"name": "A" * 1000}})
+else:
+    app._write_station_cache({"SHORT": {"name": "B"}})
+'''
+        command = [sys.executable, "-c", script, str(self.directory)]
+        root = Path(weather_app.__file__).parent
+        with subprocess.Popen(
+            command + ["long"], cwd=root, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ) as writer:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                try:
+                    ready = pool.submit(writer.stdout.readline)
+                    self.assertEqual(ready.result(timeout=5).strip(), "READY")
+                    subprocess.run(
+                        command + ["short"], cwd=root, capture_output=True,
+                        text=True, timeout=5, check=True,
+                    )
+                    self.assertEqual(json.loads(self.cache_file.read_text()), {"SHORT": {"name": "B"}})
+                    _, errors = writer.communicate("RESUME\n", timeout=5)
+                    self.assertEqual(writer.returncode, 0, errors)
+                finally:
+                    if writer.poll() is None:
+                        writer.kill()
+                        writer.communicate()
+        self.assertEqual(json.loads(self.cache_file.read_text()), {"LONG": {"name": "A" * 1000}})
+        self.assertEqual(list(self.directory.iterdir()), [self.cache_file])
+
+    def test_partial_station_cache_write_preserves_catalog_and_cleans_temporary_file(self):
+        stations = {"LHBP": {"name": "Cached Budapest"}}
+        self.write_cache(stations)
+
+        def fail(stations, cache_file, **options):
+            cache_file.write('{"partial":')
+            raise OSError("disk full")
+
+        with patch.object(weather_app.json, "dump", side_effect=fail):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                weather_app._write_station_cache({"LOWW": {"name": "Vienna"}})
+        self.assertEqual(json.loads(self.cache_file.read_text()), stations)
+        self.assertEqual(list(self.directory.iterdir()), [self.cache_file])
+
+    def test_station_cache_replace_failure_keeps_downloaded_details_and_cleans_temporary_file(self):
+        stale = {"LHBP": {"name": "Old name"}}
+        self.write_cache(stale, age=weather_app.STATION_CACHE_SECONDS + 1)
+        with patch.object(weather_app.os, "replace", side_effect=PermissionError("denied")):
+            result = weather_app.fetch_station_metadata()
+        self.assertEqual(result["LHBP"]["name"], "Budapest")
+        self.assertEqual(weather_app.fetch_station_metadata(), result)
+        self.assertEqual(json.loads(self.cache_file.read_text()), stale)
+        self.assertEqual(list(self.directory.iterdir()), [self.cache_file])
+        self.download.assert_called_once()
+
 
 class GeocodingTests(ServiceTests):
     def setUp(self):
