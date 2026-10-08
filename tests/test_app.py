@@ -61,22 +61,25 @@ class WeatherAppTests(unittest.TestCase):
             "LHBP": {"name": "Budapest/Ferihegy", "state": "PE", "country": "HU", "iata": "BUD", "elevation_m": 151}
         }
         location = {"name": "Budapest, Hungary", "latitude": 47.5, "longitude": 19.1}
-        with (
-            patch.object(weather_app, "fetch_observations", return_value=observations),
-            patch.object(weather_app, "fetch_station_metadata", return_value=metadata),
-            patch.object(weather_app, "reverse_geocode", return_value=location),
-        ):
-            response = weather_app.app.test_client().get("/api/metar?lat=47.5&lon=19.1")
-        self.assertEqual(response.status_code, 200)
-        stations = response.get_json()["stations"]
-        self.assertEqual(len(stations), weather_app.NEAREST_STATION_COUNT)
-        self.assertEqual(stations[0]["station"], "LHBP")
-        self.assertEqual(stations[0]["station_name"], "Budapest/Ferihegy")
-        self.assertEqual(response.get_json()["browser_location"]["name"], "Budapest, Hungary")
-        self.assertEqual(
-            [station["distance_km"] for station in stations],
-            sorted(station["distance_km"] for station in stations),
-        )
+        for station_count in (1, 3, len(observations), 10):
+            with self.subTest(station_count=station_count):
+                with (
+                    patch.object(weather_app, "fetch_observations", return_value=observations),
+                    patch.object(weather_app, "fetch_station_metadata", return_value=metadata),
+                    patch.object(weather_app, "reverse_geocode", return_value=location),
+                    patch.object(weather_app, "NEAREST_STATION_COUNT", station_count),
+                ):
+                    response = weather_app.app.test_client().get("/api/metar?lat=47.5&lon=19.1")
+                self.assertEqual(response.status_code, 200)
+                stations = response.get_json()["stations"]
+                self.assertEqual(len(stations), min(station_count, len(observations)))
+                self.assertEqual(stations[0]["station"], "LHBP")
+                self.assertEqual(stations[0]["station_name"], "Budapest/Ferihegy")
+                self.assertEqual(response.get_json()["browser_location"]["name"], "Budapest, Hungary")
+                self.assertEqual(
+                    [station["distance_km"] for station in stations],
+                    sorted(station["distance_km"] for station in stations),
+                )
 
     def test_csv_visibility_is_preserved_by_endpoint(self):
         for visibility, expected in (
