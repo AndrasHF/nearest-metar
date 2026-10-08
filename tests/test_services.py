@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -411,7 +411,7 @@ with patch.object(app.time, "time", side_effect=lambda: clock[0]), \\
 
     def test_persisted_limiter_contains_no_coordinates_or_labels(self):
         weather_app.reverse_geocode(47.5, 19.1)
-        with sqlite3.connect(self.directory / "geocoding.sqlite3") as connection:
+        with closing(sqlite3.connect(self.directory / "geocoding.sqlite3")) as connection:
             columns = connection.execute("PRAGMA table_info(rate_limit)").fetchall()
             rows = connection.execute("SELECT * FROM rate_limit").fetchall()
         self.assertEqual([column[1] for column in columns], ["id", "next_allowed"])
