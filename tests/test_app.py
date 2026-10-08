@@ -1,6 +1,7 @@
 import csv
 import gzip
 import io
+import json
 import socket
 import sys
 from pathlib import Path
@@ -13,7 +14,11 @@ import app as weather_app
 
 def make_feed(rows):
     output = io.StringIO()
-    fields = ["raw_text", "station_id", "observation_time", "latitude", "longitude", "temp_c", "visibility_statute_mi"]
+    fields = [
+        "raw_text", "station_id", "observation_time", "latitude", "longitude",
+        "temp_c", "dewpoint_c", "wind_speed_kt", "wind_gust_kt",
+        "visibility_statute_mi", "altim_in_hg",
+    ]
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     writer.writerows(rows)
@@ -105,6 +110,80 @@ class WeatherAppTests(unittest.TestCase):
     def test_rejects_invalid_coordinates(self):
         response = weather_app.app.test_client().get("/api/metar?lat=999&lon=nope")
         self.assertEqual(response.status_code, 400)
+
+    def test_invalid_station_coordinates_do_not_hide_valid_weather(self):
+        rows = [
+            {"raw_text": "METAR GOOD", "station_id": "GOOD", "latitude": "47.5", "longitude": "19.1"},
+            {"raw_text": "METAR ZERO", "station_id": "ZERO", "latitude": "0", "longitude": "0"},
+        ]
+        for field in ("latitude", "longitude"):
+            for invalid in ("NaN", "inf", "-inf", "1e309", "-1e309", "", "M", "invalid"):
+                rows.append({
+                    "station_id": f"BAD{len(rows)}", "latitude": "47.5", "longitude": "19.1",
+                    field: invalid,
+                })
+        for latitude, longitude in (("90.1", "19.1"), ("-90.1", "19.1"), ("47.5", "180.1"), ("47.5", "-180.1")):
+            rows.append({"station_id": f"BAD{len(rows)}", "latitude": latitude, "longitude": longitude})
+        observations = weather_app.parse_metar_csv(make_feed(rows))
+        with (
+            patch.object(weather_app, "fetch_observations", return_value=observations),
+            patch.object(weather_app, "fetch_station_metadata", return_value={}),
+            patch.object(weather_app, "reverse_geocode", return_value={}),
+            patch.object(weather_app, "NEAREST_STATION_COUNT", 2),
+            patch.object(weather_app.app.logger, "exception"),
+        ):
+            response = weather_app.app.test_client().get("/api/metar?lat=47.5&lon=19.1")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.get_data(as_text=True), parse_constant=self.fail)
+        self.assertEqual([station["station"] for station in data["stations"]], ["GOOD", "ZERO"])
+        self.assertEqual([row["station_id"] for row in observations], ["GOOD", "ZERO"])
+
+    def test_parser_preserves_coordinate_boundaries_and_zero(self):
+        coordinates = ((-90, -180), (-90, 180), (90, -180), (90, 180), (0, 0))
+        rows = [
+            {"station_id": f"VALID{index}", "latitude": str(lat), "longitude": str(lon)}
+            for index, (lat, lon) in enumerate(coordinates)
+        ]
+        observations = weather_app.parse_metar_csv(make_feed(rows))
+        self.assertEqual([(row["_lat"], row["_lon"]) for row in observations], list(coordinates))
+
+    def test_non_finite_measurements_are_missing_in_valid_json(self):
+        fields = {
+            "temp_c": "temperature_c", "dewpoint_c": "dewpoint_c",
+            "wind_speed_kt": "wind_speed_kt", "wind_gust_kt": "wind_gust_kt",
+            "visibility_statute_mi": "visibility_mi", "altim_in_hg": "altimeter_in_hg",
+        }
+        for invalid in ("NaN", "inf", "-inf", "1e309", "-1e309"):
+            with self.subTest(invalid=invalid):
+                rows = [
+                    {
+                        "raw_text": "METAR BAD", "station_id": "BAD", "latitude": "47.5", "longitude": "19.1",
+                        **dict.fromkeys(fields, invalid),
+                    },
+                    {
+                        "raw_text": "METAR GOOD", "station_id": "GOOD", "latitude": "47.6", "longitude": "19.1",
+                        **dict.fromkeys(fields, "0"),
+                    },
+                ]
+                observations = weather_app.parse_metar_csv(make_feed(rows))
+                metadata = {"BAD": {"elevation_m": float(invalid)}, "GOOD": {"elevation_m": 0}}
+                with (
+                    patch.object(weather_app, "fetch_observations", return_value=observations),
+                    patch.object(weather_app, "fetch_station_metadata", return_value=metadata),
+                    patch.object(weather_app, "reverse_geocode", return_value={}),
+                    patch.object(weather_app, "NEAREST_STATION_COUNT", 2),
+                ):
+                    response = weather_app.app.test_client().get("/api/metar?lat=47.5&lon=19.1")
+                self.assertEqual(response.status_code, 200)
+                # Python's default decoder accepts NaN/Infinity; reject them
+                # explicitly to enforce the JSON contract used by browsers.
+                data = json.loads(response.get_data(as_text=True), parse_constant=self.fail)
+                stations = {station["station"]: station for station in data["stations"]}
+                self.assertEqual(set(stations), {"BAD", "GOOD"})
+                self.assertEqual(stations["BAD"]["raw"], "METAR BAD")
+                for field in (*fields.values(), "station_elevation_m"):
+                    self.assertIsNone(stations["BAD"][field], field)
+                    self.assertEqual(stations["GOOD"][field], 0, field)
 
     def test_metadata_failure_does_not_hide_valid_weather(self):
         observation = {

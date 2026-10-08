@@ -94,11 +94,13 @@ def ensure_port_available(port: int) -> None:
         probe.close()
 
 
-def _number(value: str | None) -> float | None:
+def _number(value: str | float | None) -> float | None:
+    """Treat invalid or non-finite measurements as unreported."""
     try:
-        return float(value) if value not in (None, "", "M") else None
-    except (TypeError, ValueError):
+        number = float(value) if value not in (None, "", "M") else None
+    except (TypeError, ValueError, OverflowError):
         return None
+    return number if number is not None and math.isfinite(number) else None
 
 
 def _visibility(value: str | float | None) -> float | str | None:
@@ -133,7 +135,11 @@ def parse_metar_csv(payload: bytes) -> list[dict]:
     for row in csv.DictReader(io.StringIO("\n".join(lines[header_index:]))):
         lat = _number(row.get("latitude"))
         lon = _number(row.get("longitude"))
-        if lat is not None and lon is not None and row.get("station_id"):
+        if (
+            lat is not None and lon is not None
+            and -90 <= lat <= 90 and -180 <= lon <= 180
+            and row.get("station_id")
+        ):
             row["_lat"] = lat
             row["_lon"] = lon
             observations.append(row)
@@ -366,7 +372,7 @@ def present(row: dict, distance: float, metadata: dict | None = None) -> dict:
         "station_state": metadata.get("state"),
         "station_country": metadata.get("country"),
         "station_iata": metadata.get("iata"),
-        "station_elevation_m": metadata.get("elevation_m"),
+        "station_elevation_m": _number(metadata.get("elevation_m")),
     }
 
 
