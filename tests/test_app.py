@@ -2,6 +2,7 @@ import csv
 import gzip
 import io
 import json
+import math
 import socket
 import sys
 from pathlib import Path
@@ -223,6 +224,45 @@ class WeatherAppTests(unittest.TestCase):
     def test_haversine_known_distance(self):
         distance = weather_app.distance_km(47.5, 19.1, 48.1, 16.6)
         self.assertTrue(190 < distance < 210)
+
+    def test_haversine_antipodes_identical_positions_and_poles(self):
+        maximum = math.pi * 6371.0088
+        cases = (
+            ((-82, 0, 82, 180), maximum),
+            ((0, 0, 0, 180), maximum),
+            ((-82, 0, 82, 179.999), None),
+            ((47.5, 19.1, 47.5, 19.1), 0),
+            ((90, 0, 90, 180), 0),
+            ((90, 0, -90, 0), maximum),
+        )
+        for coordinates, expected in cases:
+            with self.subTest(coordinates=coordinates):
+                distance = weather_app.distance_km(*coordinates)
+                self.assertTrue(math.isfinite(distance))
+                self.assertGreaterEqual(distance, 0)
+                self.assertLessEqual(distance, maximum)
+                if expected is None:
+                    self.assertGreater(distance, maximum - 1)
+                else:
+                    self.assertAlmostEqual(distance, expected, places=6)
+
+    def test_antipodal_station_does_not_hide_nearby_weather(self):
+        observations = weather_app.parse_metar_csv(make_feed([
+            {"station_id": "NEAR", "latitude": "-82", "longitude": "0"},
+            {"station_id": "FAR", "latitude": "82", "longitude": "180"},
+        ]))
+        with (
+            patch.object(weather_app, "fetch_observations", return_value=observations),
+            patch.object(weather_app, "fetch_station_metadata", return_value={}),
+            patch.object(weather_app, "reverse_geocode", return_value={}),
+            patch.object(weather_app, "NEAREST_STATION_COUNT", 1),
+            patch.object(weather_app.app.logger, "exception"),
+        ):
+            response = weather_app.app.test_client().get("/api/metar?lat=-82&lon=0")
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.get_data(as_text=True), parse_constant=self.fail)
+        self.assertEqual([station["station"] for station in data["stations"]], ["NEAR"])
+        self.assertEqual(data["stations"][0]["distance_km"], 0)
 
     def test_port_conflict_exits_with_clear_message(self):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

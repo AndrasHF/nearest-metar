@@ -342,6 +342,8 @@ def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     d_phi = math.radians(lat2 - lat1)
     d_lambda = math.radians(lon2 - lon1)
     a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    # Rounding near antipodes can move the haversine outside its valid range.
+    a = max(0.0, min(1.0, a))
     return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
