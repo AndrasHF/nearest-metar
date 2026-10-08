@@ -13,7 +13,7 @@ import app as weather_app
 
 def make_feed(rows):
     output = io.StringIO()
-    fields = ["raw_text", "station_id", "observation_time", "latitude", "longitude", "temp_c"]
+    fields = ["raw_text", "station_id", "observation_time", "latitude", "longitude", "temp_c", "visibility_statute_mi"]
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     writer.writerows(rows)
@@ -71,6 +71,36 @@ class WeatherAppTests(unittest.TestCase):
             [station["distance_km"] for station in stations],
             sorted(station["distance_km"] for station in stations),
         )
+
+    def test_csv_visibility_is_preserved_by_endpoint(self):
+        for visibility, expected in (
+            ("10+", "10+"), ("6+", "6+"), ("2.5", 2.5), ("0", 0.0),
+            ("", None), ("M", None), (None, None), ("unknown", None),
+            ("unknown+", None), ("-10+", None), ("inf+", None),
+        ):
+            with self.subTest(visibility=visibility):
+                observations = weather_app.parse_metar_csv(make_feed([{
+                    "raw_text": "METAR TEST", "station_id": "TEST",
+                    "latitude": "47.44", "longitude": "19.26",
+                    "visibility_statute_mi": visibility,
+                }]))
+                with (
+                    patch.object(weather_app, "fetch_observations", return_value=observations),
+                    patch.object(weather_app, "fetch_station_metadata", return_value={}),
+                    patch.object(weather_app, "reverse_geocode", return_value={}),
+                ):
+                    response = weather_app.app.test_client().get("/api/metar?lat=47.5&lon=19.1")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.get_json()["stations"][0]["visibility_mi"], expected)
+
+    def test_present_visibility_accepts_alias(self):
+        for visibility, expected in (("10+", "10+"), ("3", 3.0), (3, 3.0), (None, None)):
+            with self.subTest(visibility=visibility):
+                row = {
+                    "station_id": "TEST", "_lat": 47.44, "_lon": 19.26,
+                    "visibility_statute_mi": "M", "visib": visibility,
+                }
+                self.assertEqual(weather_app.present(row, 1)["visibility_mi"], expected)
 
     def test_rejects_invalid_coordinates(self):
         response = weather_app.app.test_client().get("/api/metar?lat=999&lon=nope")

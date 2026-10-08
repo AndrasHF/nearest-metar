@@ -100,6 +100,16 @@ def _number(value: str | None) -> float | None:
         return None
 
 
+def _visibility(value: str | float | None) -> float | str | None:
+    """Preserve AWC's greater-than qualifier rather than report an exact value."""
+    if isinstance(value, str) and value.endswith("+"):
+        minimum = _number(value[:-1])
+        if minimum is not None and math.isfinite(minimum) and minimum >= 0:
+            return value
+        return None
+    return _number(value)
+
+
 def _first(row: dict, *names: str):
     for name in names:
         if row.get(name) not in (None, "", "M"):
@@ -323,7 +333,7 @@ def present(row: dict, distance: float, metadata: dict | None = None) -> dict:
     dewpoint = _number(_first(row, "dewpoint_c", "dewp"))
     wind_speed = _number(_first(row, "wind_speed_kt", "wspd"))
     gust = _number(_first(row, "wind_gust_kt", "wgst"))
-    visibility = _number(_first(row, "visibility_statute_mi", "visib"))
+    visibility = _visibility(_first(row, "visibility_statute_mi", "visib"))
     altimeter = _number(_first(row, "altim_in_hg", "altim"))
     metadata = metadata or {}
     return {

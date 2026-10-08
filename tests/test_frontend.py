@@ -1,15 +1,18 @@
+import gzip
 import json
 from pathlib import Path
 import unittest
 
 import quickjs
 
+import app as weather_app
 
-class WindRenderingTests(unittest.TestCase):
+
+class WeatherRenderingTests(unittest.TestCase):
     def setUp(self):
         self.javascript = quickjs.Context()
         # Execute the actual app script with a minimal DOM, then assert what
-        # render() writes to the wind element rather than duplicating its logic.
+        # render() writes to weather elements rather than duplicating its logic.
         self.javascript.eval('''
             const elements = {};
             const document = {
@@ -50,3 +53,21 @@ class WindRenderingTests(unittest.TestCase):
 
     def test_gusting_wind_is_not_calm(self):
         self.assertEqual(self.wind_text(0, 0, 8), "0° / 0 G8 KT")
+
+    def test_csv_visibility_reaches_rendering(self):
+        for visibility, expected in (
+            ("10+", "10+ SM"), ("6+", "6+ SM"), ("2.5", "2.5 SM"),
+            ("0", "0 SM"), ("", "—"), ("M", "—"),
+        ):
+            with self.subTest(visibility=visibility):
+                payload = gzip.compress((
+                    "raw_text,station_id,latitude,longitude,visibility_statute_mi\n"
+                    f"METAR TEST,TEST,47.44,19.26,{visibility}\n"
+                ).encode())
+                observation = weather_app.parse_metar_csv(payload)[0]
+                data = weather_app.present(observation, 1)
+                self.javascript.eval(f"render({json.dumps(data)});")
+                self.assertEqual(
+                    self.javascript.eval('document.getElementById("visibility").textContent'),
+                    expected,
+                )
